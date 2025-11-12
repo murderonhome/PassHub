@@ -1,6 +1,6 @@
 # PassHub - Менеджер паролей
 
-![PassHub](https://img.shields.io/badge/PassHub-1.0.0-blue)
+![Version](https://img.shields.io/badge/PassHub-1.0.1-blue)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-green)
 ![Security](https://img.shields.io/badge/Security-Encrypted-red)
 
