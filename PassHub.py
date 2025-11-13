@@ -410,16 +410,24 @@ class SetupMasterPasswordDialog(QDialog):
 
 
 class AddPasswordDialog(QDialog):
-    """Диалог добавления пароля"""
+    """Диалог добавления/редактирования пароля"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, edit_mode=False, data=None):
         super().__init__(parent)
-        self.setWindowTitle("Добавить пароль")
+        self.edit_mode = edit_mode
+        self.original_service = None
+        
+        if edit_mode:
+            self.setWindowTitle("Редактировать пароль")
+            self.original_service = data.get('service', '') if data else None
+        else:
+            self.setWindowTitle("Добавить пароль")
+            
         self.setModal(True)
-        self.setFixedSize(450, 300)
-        self.init_ui()
+        self.setFixedSize(450, 350)
+        self.init_ui(data)
 
-    def init_ui(self):
+    def init_ui(self, data=None):
         layout = QFormLayout(self)
 
         self.service_input = QLineEdit()
@@ -432,14 +440,40 @@ class AddPasswordDialog(QDialog):
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.setPlaceholderText("Пароль для сервиса")
 
+        # Кнопка показать/скрыть пароль
+        password_layout = QHBoxLayout()
+        password_layout.addWidget(self.password_input)
+        
+        self.show_password_btn = QPushButton("👁")
+        self.show_password_btn.setFixedWidth(40)
+        self.show_password_btn.setToolTip("Показать/скрыть пароль")
+        self.show_password_btn.clicked.connect(self.toggle_password_visibility)
+        password_layout.addWidget(self.show_password_btn)
+
         self.notes_input = QTextEdit()
         self.notes_input.setMaximumHeight(100)
         self.notes_input.setPlaceholderText("Дополнительная информация (необязательно)")
 
+        # Если режим редактирования, заполняем поля
+        if self.edit_mode and data:
+            self.service_input.setText(data.get('service', ''))
+            self.username_input.setText(data.get('username', ''))
+            self.password_input.setText(data.get('password', ''))
+            self.notes_input.setPlainText(data.get('notes', ''))
+            
+            # В режиме редактирования делаем поле "Сервис" только для чтения
+            self.service_input.setReadOnly(True)
+            self.service_input.setStyleSheet("background-color: #f0f0f0;")
+
         layout.addRow("Сервис *:", self.service_input)
         layout.addRow("Логин *:", self.username_input)
-        layout.addRow("Пароль *:", self.password_input)
+        layout.addRow("Пароль *:", password_layout)
         layout.addRow("Заметки:", self.notes_input)
+
+        if self.edit_mode:
+            note = QLabel("<i>Примечание: название сервиса нельзя изменить</i>")
+            note.setStyleSheet("color: #666; font-size: 10px;")
+            layout.addRow("", note)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
@@ -448,6 +482,15 @@ class AddPasswordDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+
+    def toggle_password_visibility(self):
+        """Переключение видимости пароля"""
+        if self.password_input.echoMode() == QLineEdit.EchoMode.Password:
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.show_password_btn.setText("🔒")
+        else:
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.show_password_btn.setText("👁")
 
     def get_data(self):
         return {
@@ -1131,6 +1174,9 @@ class PasswordManager(QMainWindow):
                         self.db_conn.close()
                         self.db_conn = None
 
+                    # Даем время на закрытие соединения
+                    QApplication.processEvents()
+
                     # Создаем резервную копию текущей БД
                     if os.path.exists('passhub.db'):
                         shutil.copy2('passhub.db',
@@ -1229,8 +1275,69 @@ class PasswordManager(QMainWindow):
 
     def edit_password(self):
         """Редактирование пароля"""
-        QMessageBox.information(self, "Информация",
-                                "Функция редактирования в разработке.\nИспользуйте удаление и добавление заново.")
+        current_row = self.passwords_table.currentRow()
+        if current_row == -1:
+            QMessageBox.warning(self, "Ошибка", "Выберите пароль для редактирования!")
+            return
+
+        # Получаем данные из таблицы
+        service = self.passwords_table.item(current_row, 0).text()
+        username = self.passwords_table.item(current_row, 1).text()
+
+        # Получаем зашифрованные данные из БД
+        try:
+            cursor = self.db_conn.cursor()
+            cursor.execute(
+                "SELECT password_encrypted, notes_encrypted FROM passwords WHERE service = ?",
+                (service,)
+            )
+            result = cursor.fetchone()
+
+            if not result:
+                QMessageBox.warning(self, "Ошибка", "Запись не найдена в базе данных!")
+                return
+
+            password_encrypted, notes_encrypted = result
+
+            # Расшифровываем данные
+            password_decrypted = self.decrypt_data(password_encrypted)
+            notes_decrypted = self.decrypt_data(notes_encrypted) if notes_encrypted else ""
+
+            # Создаем данные для диалога
+            current_data = {
+                'service': service,
+                'username': username,
+                'password': password_decrypted,
+                'notes': notes_decrypted
+            }
+
+            # Открываем диалог редактирования
+            dialog = AddPasswordDialog(self, edit_mode=True, data=current_data)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                new_data = dialog.get_data()
+
+                if not new_data['username'] or not new_data['password']:
+                    QMessageBox.warning(self, "Ошибка", "Логин и пароль обязательны для заполнения!")
+                    return
+
+                # Шифруем новые данные
+                password_encrypted = self.encrypt_data(new_data['password'])
+                notes_encrypted = self.encrypt_data(new_data['notes']) if new_data['notes'] else ""
+
+                # Обновляем запись в БД
+                cursor.execute('''
+                    UPDATE passwords 
+                    SET username = ?, password_encrypted = ?, notes_encrypted = ?
+                    WHERE service = ?
+                ''', (new_data['username'], password_encrypted, notes_encrypted, service))
+
+                self.db_conn.commit()
+                self.load_passwords()
+                QMessageBox.information(self, "Успех", "Пароль успешно обновлен!")
+
+        except Exception as e:
+            print(f"Ошибка редактирования: {e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось отредактировать пароль:\n{e}")
 
     def delete_password(self):
         """Удаление пароля"""
